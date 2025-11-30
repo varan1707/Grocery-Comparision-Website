@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Grocery Price Comparison</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <h1>Grocery Price Comparison</h1>
+        <p>Search groceries across Walmart, Kroger, Aldi, Whole Foods, and Trader Joe's in real time.</p>
+      </header>
+
+      <section class="search-section">
+        <div class="field-group">
+          <label for="query">Item to search</label>
+          <input id="query" type="text" placeholder="e.g. milk, eggs, bananas" />
+        </div>
+
+        <div class="field-group">
+          <span class="label">Stores</span>
+          <div id="stores-container" class="stores-container">
+            <!-- store checkboxes populated by JS -->
+          </div>
+        </div>
+
+        <div class="search-actions">
+          <button id="search-btn">Search & Compare</button>
+          <span id="status" class="status"></span>
+        </div>
+      </section>
+
+      <main class="main-layout">
+        <section class="results-section">
+          <h2>Search Results</h2>
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th>Store</th>
+                <th>Product</th>
+                <th>Price</th>
+                <th>Unit</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </section>
+
+        <aside class="list-section">
+          <h2>Comparison List</h2>
+          <p class="hint">
+            Add the best option for each product to this list to compare your basket across stores.
+          </p>
+          <table id="list-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Store</th>
+                <th>Price</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="list-body"></tbody>
+          </table>
+          <div class="totals">
+            <span>Total items: <strong id="total-items">0</strong></span>
+            <span>Total cost: <strong id="total-cost">$0.00</strong></span>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+  </html>
+
+
