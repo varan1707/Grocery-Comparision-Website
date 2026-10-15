@@ -136,6 +136,13 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+
+# Private keys / credentials (Walmart.io RSA keys etc.)
+*.pem
+*.key
+WM_IO_*
 .envrc
 .venv
 env/

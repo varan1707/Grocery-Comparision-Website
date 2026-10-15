@@ -1,169 +1,77 @@
 ## Grocery Comparison App (Live Store APIs)
 
-This project is a minimal end-to-end app that compares grocery prices across
-major US chains (Walmart, Kroger, Aldi, Whole Foods, Trader Joe's).
+Compares grocery prices across US chains using the stores' **official, free APIs**.
+Prices are fetched live on every search; there is no price database.
 
-**Key design principle:** pricing data is fetched in real time from online
-store APIs (or HTTP endpoints you control), *not* from a static database.
+| Store | Data source | Status |
+| --- | --- | --- |
+| Walmart | [Walmart.io Affiliate API](https://walmart.io/docs/affiliates/v1/introduction) | Live (needs keys) |
+| Kroger | [Kroger Public API](https://developer.kroger.com) | Live (needs keys + ZIP) |
+| Target, Aldi, Whole Foods, Trader Joe's | No free official API | "Prices coming soon" |
 
-### High-level architecture
+Stores without keys show as **Not configured**. The app never invents prices
+unless you explicitly turn on `USE_MOCK_DATA=true`, and even then they're
+labelled "Demo data".
 
-- **Backend (`backend/`, FastAPI):**
-  - `/api/search` – accepts a product search query and selected stores and
-    returns normalized product results per store.
-  - Store-specific clients (`backend/store_clients/*.py`) encapsulate the logic
-    of calling each retailer's API or HTTP endpoint.
-  - No database is used for prices; every request results in outbound HTTP
-    calls to the configured store endpoints (with a simple mock fallback so the
-    app can still run before you wire real APIs).
-
-- **Frontend (`frontend/`, vanilla JS):**
-  - Simple single-page UI:
-    - Enter an item (e.g., "milk").
-    - Select which stores to compare (Walmart, Kroger, Aldi, Whole Foods,
-      Trader Joe's).
-    - See a table of results and add items to a "comparison list" / basket.
-  - All comparisons are done client-side using the live data from the backend.
-
-### Store integration layer
-
-All integrations go through the `BaseStoreClient` interface:
-
-- `backend/store_clients/base.py` defines `BaseStoreClient` with
-  `search_products(query: str, limit: int) -> List[StoreProduct]`.
-- `backend/models.py` defines the normalized `StoreProduct` returned to the UI.
-
-Concrete implementations:
-
-- `WalmartClient` (`backend/store_clients/walmart.py`)
-  - Skeleton that demonstrates how to call a real HTTP API using `httpx`.
-  - Reads credentials and base URL from environment variables:
-    - `WALMART_API_KEY`
-    - `WALMART_BASE_URL`
-  - You must plug in the real Walmart endpoint path and response mapping.
-
-- Generic simple HTTP clients (`backend/store_clients/other_stores.py`)
-  - `SimpleHttpStoreClient` expects a uniform JSON shape like:
-
-    ```json
-    {
-      "items": [
-        {
-          "id": "123",
-          "name": "2% Milk Gallon",
-          "price": 3.49,
-          "currency": "USD",
-          "unit": "per gallon",
-          "image_url": "https://...",
-          "product_url": "https://..."
-        }
-      ]
-    }
-    ```
-
-  - Builder helpers:
-    - `build_kroger_client()` → `KROGER_BASE_URL`
-    - `build_aldi_client()` → `ALDI_BASE_URL`
-    - `build_wholefoods_client()` → `WHOLEFOODS_BASE_URL`
-    - `build_traderjoes_client()` → `TRADERJOES_BASE_URL`
-
-- Mock fallback (`backend/store_clients/mock_clients.py`)
-  - When no base URL / API key is configured, a `MockStoreClient` generates
-    reasonable-looking prices so the UI and flows remain testable.
-  - This is the only place with fake data; it is deliberately isolated so you
-    can delete/replace it once real integrations exist.
-
-### Backend API overview
-
-- `POST /api/search`
-  - Body:
-
-    ```json
-    {
-      "query": "milk",
-      "stores": ["walmart", "kroger", "aldi", "wholefoods", "traderjoes"],
-      "limit": 5
-    }
-    ```
-
-  - Response:
-
-    ```json
-    {
-      "query": "milk",
-      "results": [
-        {
-          "store_id": "walmart",
-          "store_name": "Walmart",
-          "product_id": "123",
-          "name": "2% Milk Gallon",
-          "price": 3.49,
-          "currency": "USD",
-          "unit": "per gallon",
-          "image_url": "https://...",
-          "product_url": "https://..."
-        }
-      ]
-    }
-    ```
-
-- `GET /api/stores`
-  - Returns a map of supported store IDs to display names.
-
-### Running the backend
-
-From the project root:
+### Quick start
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate  # on Windows PowerShell
-pip install -r requirements.txt
+source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+pre-commit install               # blocks commits containing secrets
 
+cp .env.example .env             # then fill in your keys (see docs/API_SETUP.md)
 uvicorn backend.main:app --reload
 ```
 
-The API will listen on `http://localhost:8000`.
+Open <http://localhost:8000>. The backend serves the frontend, so don't open
+`frontend/index.html` directly. To host the frontend separately, set
+`window.GROCERY_API_BASE_URL` before `app.js` loads and add that origin to
+`CORS_ALLOW_ORIGINS`.
 
-### Running the frontend
+Run the tests with `pytest`.
 
-You can open `frontend/index.html` directly in a browser, or serve it with a
-simple static server (e.g. VS Code Live Server, `python -m http.server`, etc.).
+### Getting API keys
 
-Ensure the backend is running at `http://localhost:8000` so the UI can call it.
+Step-by-step instructions for creating the Kroger and Walmart.io accounts,
+generating the Walmart RSA key, and wiring everything into `.env` are in
+[docs/API_SETUP.md](docs/API_SETUP.md).
 
-### Wiring real store APIs
+### Keeping secrets out of this public repo
 
-1. **Get API access (or scraping adapters)** for each retailer:
-   - Use official APIs where available (e.g., developer portals).
-   - For stores without public APIs, you may choose to use a third-party
-     aggregator API or a compliant scraping service. Keep terms of service and
-     legal constraints in mind.
+- Keys are read **only by the backend** from environment variables (`.env` locally,
+  your host's secret settings in production). Nothing secret is sent to the browser.
+- `.env`, `*.pem` and `*.key` are git-ignored; `.env.example` holds placeholders only.
+- `pre-commit` (gitleaks + private-key detector) and the CI `secret-scan` job fail
+  if a secret is committed. If one ever leaks, rotate it in the store's portal.
 
-2. **Configure environment variables** (e.g. via a `.env` file):
+### Architecture
 
-   ```env
-   WALMART_API_KEY=...
-   WALMART_BASE_URL=https://api.your-provider.com/walmart
-   KROGER_BASE_URL=https://api.your-provider.com/kroger
-   ALDI_BASE_URL=https://api.your-provider.com/aldi
-   WHOLEFOODS_BASE_URL=https://api.your-provider.com/wholefoods
-   TRADERJOES_BASE_URL=https://api.your-provider.com/traderjoes
-   LOG_LEVEL=INFO
-   ```
+- `backend/main.py`: FastAPI app.
+  - `GET /api/stores`: each store with `status` set to `live`, `not_configured`,
+    `coming_soon`, or `demo`.
+  - `POST /api/search` with body `{"query": "milk", "stores": ["walmart", "kroger"], "zip_code": "45202", "limit": 5}`.
+    It queries the stores in parallel and returns `results` (normalized
+    products) plus a `stores` list. Each entry in `stores` has a per-store
+    `status`/`message`, so a store outage shows up as `error` instead of an
+    empty result.
+- `backend/store_clients/`
+  - `walmart.py`: signs requests (`WM_CONSUMER.ID`, `WM_CONSUMER.INTIMESTAMP`,
+    `WM_SEC.KEY_VERSION`, `WM_SEC.AUTH_SIGNATURE`) and maps search results.
+  - `kroger.py`: gets an OAuth2 client-credentials token (cached), maps the ZIP
+    to the nearest store (cached), and searches products with that store's
+    prices.
+  - `mock_clients.py`: demo data for UI work, used only with `USE_MOCK_DATA=true`.
+- `backend/config.py`: the store registry plus all settings, read from the environment.
+- `frontend/`: vanilla JS UI with a ZIP input, per-store status badges, and a comparison basket.
 
-3. **Implement the response mapping**:
-   - Update `WalmartClient.search_products` with the real JSON keys coming back
-     from Walmart (or the intermediary provider you use).
-   - Ensure the other stores' endpoints return the expected JSON shape for
-     `SimpleHttpStoreClient` or create dedicated clients if needed.
+### Configuration
 
-4. **Optionally add caching**:
-   - You may layer a short-lived in-memory cache (e.g. 1–5 minutes) around
-     outbound calls to reduce latency and API costs, while still keeping data
-     effectively real time.
+See [.env.example](.env.example) for every variable:
 
-At this point, every user search will fan out to the configured stores, and
-the comparison UI will always reflect the latest prices from those platforms,
-without relying on any static database.
-
-
+- `KROGER_CLIENT_ID`, `KROGER_CLIENT_SECRET`
+- `WALMART_CONSUMER_ID`, `WALMART_KEY_VERSION`, and either
+  `WALMART_PRIVATE_KEY_PATH` or `WALMART_PRIVATE_KEY`
+- Optional: `WALMART_PUBLISHER_ID`, `DEFAULT_ZIP_CODE`, `USE_MOCK_DATA`,
+  `CORS_ALLOW_ORIGINS`, `HTTP_TIMEOUT_SECONDS`, `LOG_LEVEL`
