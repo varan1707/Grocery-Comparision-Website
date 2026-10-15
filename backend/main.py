@@ -1,31 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List
+from typing import AsyncIterator, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import (
-    STORE_DISPLAY_NAMES,
-    STORE_IDS,
-    API_CONFIG,
-    configure_logging,
+from backend.config import API_CONFIG, STORE_IDS, STORES, STORES_BY_ID, ApiConfig, configure_logging
+from backend.models import (
+    SearchQuery,
+    SearchResponse,
+    StoreInfo,
+    StoreProduct,
+    StoreSearchStatus,
 )
-from backend.models import SearchQuery, SearchResponse, StoreProduct
-from backend.store_clients.base import BaseStoreClient
+from backend.store_clients.base import BaseStoreClient, StoreClientError
+from backend.store_clients.kroger import KrogerClient
 from backend.store_clients.mock_clients import MockStoreClient
-from backend.store_clients.other_stores import (
-    build_aldi_client,
-    build_kroger_client,
-    build_traderjoes_client,
-    build_wholefoods_client,
-)
 from backend.store_clients.walmart import WalmartClient
-
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = BASE_DIR / "frontend"
@@ -34,96 +32,181 @@ INDEX_FILE = FRONTEND_DIR / "index.html"
 configure_logging()
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Grocery Price Comparison API", version="0.1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+NOT_CONFIGURED_MESSAGE = {
+    "walmart": "Walmart API keys not set (WALMART_CONSUMER_ID / WALMART_PRIVATE_KEY).",
+    "kroger": "Kroger API keys not set (KROGER_CLIENT_ID / KROGER_CLIENT_SECRET).",
+}
 
 
-def build_store_clients() -> Dict[str, BaseStoreClient]:
-    """Instantiate clients for all supported stores.
+def build_store_clients(config: ApiConfig, http: httpx.AsyncClient) -> Dict[str, BaseStoreClient]:
+    """Create a client for every store that has credentials configured.
 
-    For now, only Walmart has an explicit HTTP-based client skeleton.
-    Others use `SimpleHttpStoreClient` if base URLs are configured.
-    Any missing store falls back to a mock client, so the app always runs.
+    Stores without credentials are left out (reported as `not_configured`),
+    unless USE_MOCK_DATA is on, in which case they get clearly-labelled demo data.
     """
     clients: Dict[str, BaseStoreClient] = {}
 
-    # Walmart
-    walmart_client: BaseStoreClient
-    if API_CONFIG.walmart_base_url and API_CONFIG.walmart_api_key:
-        walmart_client = WalmartClient()
-    else:
-        walmart_client = MockStoreClient("walmart")
-    clients["walmart"] = walmart_client
+    if config.walmart_configured:
+        try:
+            clients["walmart"] = WalmartClient(
+                consumer_id=config.walmart_consumer_id,  # type: ignore[arg-type]
+                private_key=config.walmart_private_key,  # type: ignore[arg-type]
+                http=http,
+                key_version=config.walmart_key_version,
+                publisher_id=config.walmart_publisher_id,
+                base_url=config.walmart_base_url,
+            )
+        except ValueError:
+            logger.error("WALMART_PRIVATE_KEY could not be loaded as a PKCS#8 RSA key")
 
-    # Kroger, Aldi, Whole Foods, Trader Joe's via SimpleHttpStoreClient
-    kroger = build_kroger_client() or MockStoreClient("kroger")
-    aldi = build_aldi_client() or MockStoreClient("aldi")
-    wholefoods = build_wholefoods_client() or MockStoreClient("wholefoods")
-    traderjoes = build_traderjoes_client() or MockStoreClient("traderjoes")
+    if config.kroger_configured:
+        clients["kroger"] = KrogerClient(
+            client_id=config.kroger_client_id,  # type: ignore[arg-type]
+            client_secret=config.kroger_client_secret,  # type: ignore[arg-type]
+            http=http,
+            base_url=config.kroger_base_url,
+            default_zip_code=config.default_zip_code,
+        )
 
-    clients["kroger"] = kroger
-    clients["aldi"] = aldi
-    clients["wholefoods"] = wholefoods
-    clients["traderjoes"] = traderjoes
+    if config.use_mock_data:
+        for store in STORES:
+            if store.integration != "coming_soon" and store.store_id not in clients:
+                clients[store.store_id] = MockStoreClient(store.store_id)
+
+    for store in STORES:
+        if store.integration == "coming_soon":
+            continue
+        if store.store_id in clients:
+            mode = "demo" if isinstance(clients[store.store_id], MockStoreClient) else "live"
+            logger.info("Store %s: %s", store.store_id, mode)
+        else:
+            logger.warning("Store %s: not configured", store.store_id)
 
     return clients
 
 
-STORE_CLIENTS: Dict[str, BaseStoreClient] = build_store_clients()
+def store_info(store_id: str, clients: Dict[str, BaseStoreClient]) -> StoreInfo:
+    store = STORES_BY_ID[store_id]
+    if store.integration == "coming_soon":
+        return StoreInfo(
+            store_id=store_id,
+            store_name=store.display_name,
+            status="coming_soon",
+            message=f"Prices coming soon. {store.note}".strip(),
+        )
+    client = clients.get(store_id)
+    if client is None:
+        return StoreInfo(
+            store_id=store_id,
+            store_name=store.display_name,
+            status="not_configured",
+            message=NOT_CONFIGURED_MESSAGE.get(store_id),
+        )
+    if isinstance(client, MockStoreClient):
+        return StoreInfo(
+            store_id=store_id,
+            store_name=store.display_name,
+            status="demo",
+            message="Demo data (USE_MOCK_DATA=true), not real prices.",
+        )
+    return StoreInfo(store_id=store_id, store_name=store.display_name, status="live")
 
 
-@app.get("/")
-async def serve_frontend() -> FileResponse:
-    """Serve the main frontend HTML at the root path."""
-    if not INDEX_FILE.exists():
-        logger.error("Frontend index.html not found at %s", INDEX_FILE)
-        raise HTTPException(status_code=500, detail="Frontend not available.")
-    return FileResponse(INDEX_FILE)
+async def search_store(
+    store_id: str,
+    clients: Dict[str, BaseStoreClient],
+    query: str,
+    limit: int,
+    zip_code: Optional[str],
+) -> tuple[StoreSearchStatus, List[StoreProduct]]:
+    info = store_info(store_id, clients)
+    status = StoreSearchStatus(**info.model_dump())
+    client = clients.get(store_id)
+    if client is None or info.status == "coming_soon":
+        return status, []
+    try:
+        result = await client.search_products(query, limit=limit, zip_code=zip_code)
+    except StoreClientError as exc:
+        logger.warning("Store %s: %s", store_id, exc)
+        status.status, status.message = "error", str(exc)
+        return status, []
+    except httpx.TimeoutException:
+        logger.warning("Store %s timed out", store_id)
+        status.status, status.message = "error", f"{info.store_name} did not respond in time."
+        return status, []
+    except Exception:  # noqa: BLE001
+        logger.exception("Store client failed for %s", store_id)
+        status.status, status.message = "error", f"{info.store_name} is unavailable right now."
+        return status, []
+    status.result_count = len(result.products)
+    status.location = result.location
+    return status, result.products
 
 
-@app.get("/api/stores", response_model=Dict[str, str])
-async def list_stores() -> Dict[str, str]:
-    """Return supported store IDs and display names."""
-    return STORE_DISPLAY_NAMES
+def create_app(config: ApiConfig = API_CONFIG, http: Optional[httpx.AsyncClient] = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        client = http or httpx.AsyncClient(timeout=config.http_timeout_seconds)
+        app.state.clients = build_store_clients(config, client)
+        try:
+            yield
+        finally:
+            if http is None:
+                await client.aclose()
 
+    app = FastAPI(title="Grocery Price Comparison API", version="0.2.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.cors_allow_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
-@app.post("/api/search", response_model=SearchResponse)
-async def search_products(body: SearchQuery) -> SearchResponse:
-    if not body.query.strip():
-        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    @app.get("/")
+    async def serve_frontend() -> FileResponse:
+        """Serve the main frontend HTML at the root path."""
+        if not INDEX_FILE.exists():
+            logger.error("Frontend index.html not found at %s", INDEX_FILE)
+            raise HTTPException(status_code=500, detail="Frontend not available.")
+        return FileResponse(INDEX_FILE)
 
-    stores: List[str] = body.stores or STORE_IDS
-    invalid_stores = [s for s in stores if s not in STORE_CLIENTS]
-    if invalid_stores:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown store ids requested: {', '.join(invalid_stores)}",
+    @app.get("/api/stores", response_model=List[StoreInfo])
+    async def list_stores() -> List[StoreInfo]:
+        """Return every store with whether live prices are available for it."""
+        return [store_info(s.store_id, app.state.clients) for s in STORES]
+
+    @app.post("/api/search", response_model=SearchResponse)
+    async def search_products(body: SearchQuery) -> SearchResponse:
+        query = body.query.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="Query must not be empty.")
+
+        stores: List[str] = body.stores or STORE_IDS
+        invalid_stores = [s for s in stores if s not in STORES_BY_ID]
+        if invalid_stores:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown store ids requested: {', '.join(invalid_stores)}",
+            )
+
+        outcomes = await asyncio.gather(
+            *(
+                search_store(s, app.state.clients, query, body.limit, body.zip_code)
+                for s in stores
+            )
+        )
+        return SearchResponse(
+            query=query,
+            results=[p for _, products in outcomes for p in products],
+            stores=[status for status, _ in outcomes],
         )
 
-    all_results: List[StoreProduct] = []
+    @app.get("/health")
+    async def health() -> Dict[str, str]:
+        return {"status": "ok"}
 
-    for store_id in stores:
-        client = STORE_CLIENTS[store_id]
-        try:
-            results = await client.search_products(body.query, limit=body.limit)
-            all_results.extend(results)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Store client failed for %s: %s", store_id, exc)
-
-    return SearchResponse(query=body.query, results=all_results)
+    return app
 
 
-@app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok"}
-
-
+app = create_app()

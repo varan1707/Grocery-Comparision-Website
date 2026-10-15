@@ -10,7 +10,7 @@
     <div class="app">
       <header class="app-header">
         <h1>Grocery Price Comparison</h1>
-        <p>Search groceries across Walmart, Kroger, Aldi, Whole Foods, and Trader Joe's in real time.</p>
+        <p>Compare live grocery prices across stores. Walmart and Kroger prices come straight from their official APIs; more stores are coming soon.</p>
       </header>
 
       <section class="search-section">
@@ -19,12 +19,19 @@
           <input id="query" type="text" placeholder="e.g. milk, eggs, bananas" />
         </div>
 
+        <div class="field-group zip-group">
+          <label for="zip">ZIP code <span class="hint-inline">(used to pick your nearest Kroger store)</span></label>
+          <input id="zip" type="text" inputmode="numeric" maxlength="5" placeholder="e.g. 45202" />
+        </div>
+
         <div class="field-group">
           <span class="label">Stores</span>
           <div id="stores-container" class="stores-container">
             <!-- store checkboxes populated by JS -->
           </div>
         </div>
+
+        <ul id="store-status" class="store-status"></ul>
 
         <div class="search-actions">
           <button id="search-btn">Search & Compare</button>
@@ -75,6 +82,6 @@
 
     <script src="/static/app.js"></script>
   </body>
-  </html>
+</html>
 
 
